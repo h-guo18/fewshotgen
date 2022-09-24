@@ -18,43 +18,50 @@ import sys
 from utils import set_logger, set_random_seed
 from sklearn.model_selection import train_test_split
 from data_parallel import BalancedDataParallel
-from transformers import GPT2LMHeadModel, GPT2Config, CpmTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 import torch.nn.utils.rnn as rnn_utils
 import numpy as np
 from dataset import CPMDataset
+import json
+from tensorboardX import SummaryWriter
+from opendelta import Visualization, AdapterModel
+TEST_DOMAIN = ['gongwen','international','poetry','sports','story']
 
 
 def set_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='0,1', type=str, required=False, help='设置使用哪些显卡')
+    parser.add_argument('--domain', default='', type=str, required=True, help='adaption domain')
+    parser.add_argument('--shotnum', default=128, type=int, required=True, help='fewshot shotnum')
+    parser.add_argument('--adaption_type', type=str, default='finetune', help='finetune,adapter,or lora')
+
+    parser.add_argument('--device', default='0', type=str, required=False, help='设置使用哪些显卡')
     parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行训练')
     parser.add_argument('--vocab_path', default='vocab/chinese_vocab.model', type=str, required=False,
                         help='sp模型路径')
     parser.add_argument('--model_config', default='config/cpm-small.json', type=str, required=False,
                         help='需要从头训练一个模型时，模型参数的配置文件')
-    parser.add_argument('--train_path', default='data/train.pkl', type=str, required=False, help='经过预处理之后的数据存放路径')
     parser.add_argument('--max_len', default=200, type=int, required=False, help='训练时，输入数据的最大长度')
-
     parser.add_argument('--log_path', default='log/train.log', type=str, required=False, help='训练日志存放位置')
     parser.add_argument('--ignore_index', default=-100, type=int, required=False, help='对于ignore_index的label token不计算梯度')
-    parser.add_argument('--epochs', default=100, type=int, required=False, help='训练的最大轮次')
-    parser.add_argument('--batch_size', default=16, type=int, required=False, help='训练的batch size')
+    parser.add_argument('--epochs', default=-1, type=int, required=False, help='训练的最大轮次')
+    parser.add_argument('--batch_size', default=2, type=int, required=False, help='训练的batch size')
     parser.add_argument('--gpu0_bsz', default=6, type=int, required=False, help='0号卡的batch size')
     parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
     parser.add_argument('--eps', default=1.0e-09, type=float, required=False, help='AdamW优化器的衰减率')
-    parser.add_argument('--log_step', default=1, type=int, required=False, help='多少步汇报一次loss')
+    parser.add_argument('--log_step', default=5, type=int, required=False, help='多少步汇报一次loss')
     parser.add_argument('--gradient_accumulation_steps', default=6, type=int, required=False, help='梯度积累的步数')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
-    parser.add_argument('--save_model_path', default='model', type=str, required=False,
+    parser.add_argument('--save_model_path', default='save/', type=str, required=False,
                         help='模型输出路径')
-    parser.add_argument('--pretrained_model', default='model/zuowen_epoch40', type=str, required=False,
+    parser.add_argument('--pretrained_model', default='uer/gpt2-chinese-cluecorpussmall', type=str, required=False,
                         help='预训练的模型的路径')
     parser.add_argument('--seed', type=int, default=1234, help='设置随机种子')
     parser.add_argument('--num_workers', type=int, default=0, help="dataloader加载数据时使用的线程数量")
     # parser.add_argument('--patience', type=int, default=0, help="用于early stopping,设为0时,不进行early stopping.early stop得到的模型的生成效果不一定会更好。")
-    parser.add_argument('--warmup_steps', type=int, default=4000, help='warm up步数')
     # parser.add_argument('--label_smoothing', default=True, action='store_true', help='是否进行标签平滑')
+    parser.add_argument('--model_name', type=str, default='', help='model name')
+
     args = parser.parse_args()
     return args
 
@@ -72,8 +79,8 @@ def load_dataset(logger, args):
     logger.info("loading training dataset")
     train_path = args.train_path
 
-    with open(train_path, "rb") as f:
-        train_list = pickle.load(f)
+    with open(train_path, "r") as f:
+        train_list = json.loads(f.read())
 
     # test
     # train_list = train_list[:24]
@@ -84,7 +91,7 @@ def load_dataset(logger, args):
 
 
 def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
-                epoch, args):
+                epoch, args,writer):
     model.train()
     device = args.device
     ignore_index = args.ignore_index
@@ -93,8 +100,10 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
     total_loss = 0  # 记录下整个epoch的loss的总和
     epoch_correct_num = 0   # 每个epoch中,预测正确的word的数量
     epoch_total_num = 0  # 每个epoch中,预测的word的总数量
+    batch_loss =0
 
-    for batch_idx, (input_ids, labels) in enumerate(train_dataloader):
+
+    for batch_idx, (input_ids, labels) in tqdm(enumerate(train_dataloader),total = len(train_dataloader),desc = f'epoch {epoch}/ {args.epochs}'):
         # 捕获cuda out of memory exception
         try:
             input_ids = input_ids.to(device)
@@ -128,11 +137,14 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
                 scheduler.step()
                 # 清空梯度信息
                 optimizer.zero_grad()
+            batch_loss = loss.item() * args.gradient_accumulation_steps
 
             if (batch_idx + 1) % args.log_step == 0:
-                logger.info(
-                    "batch {} of epoch {}, loss {}, batch_acc {}, lr {}".format(
-                        batch_idx + 1, epoch + 1, loss.item() * args.gradient_accumulation_steps, batch_acc, scheduler.get_lr()))
+                writer.add_scalar('batch_loss', loss.item() * args.gradient_accumulation_steps,global_step = batch_idx + 1 + len(train_dataloader)*epoch )
+                writer.add_scalar('lr', scheduler.get_lr(),global_step = batch_idx + 1 + len(train_dataloader)*epoch )
+                # logger.info(
+                #     "batch {} of epoch {}, loss {}, batch_acc {}, lr {}".format(
+                #         batch_idx + 1, epoch + 1, loss.item() * args.gradient_accumulation_steps, batch_acc, scheduler.get_lr()))
 
             del input_ids, outputs
 
@@ -148,16 +160,11 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
     # 记录当前epoch的平均loss与accuracy
     epoch_mean_loss = total_loss / len(train_dataloader)
     epoch_mean_acc = epoch_correct_num / epoch_total_num
+    writer.add_scalar('epoch_loss', epoch_mean_loss,global_step =epoch + 1)
+    writer.add_scalar('epoch_acc', epoch_mean_acc,global_step =epoch + 1)
     logger.info(
         "epoch {}: loss {}, predict_acc {}".format(epoch + 1, epoch_mean_loss, epoch_mean_acc))
 
-    # save model
-    logger.info('saving model for epoch {}'.format(epoch + 1))
-    model_path = join(args.save_model_path, 'epoch{}'.format(epoch + 1))
-    if not os.path.exists(model_path):
-        os.mkdir(model_path)
-    model_to_save = model.module if hasattr(model, 'module') else model
-    model_to_save.save_pretrained(model_path)
     logger.info('epoch {} finished'.format(epoch + 1))
     epoch_finish_time = datetime.now()
     logger.info('time for one epoch: {}'.format(epoch_finish_time - epoch_start_time))
@@ -165,7 +172,7 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
     return epoch_mean_loss
 
 
-def train(model, logger, train_dataset, args):
+def train(model, logger, train_dataset, args,writer):
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn,
         drop_last=True
@@ -173,7 +180,7 @@ def train(model, logger, train_dataset, args):
     t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.epochs
     optimizer = transformers.AdamW(model.parameters(), lr=args.lr, eps=args.eps)
     scheduler = transformers.get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
+        optimizer, num_warmup_steps=0.3*t_total, num_training_steps=t_total
     )
 
     logger.info('start training')
@@ -184,9 +191,20 @@ def train(model, logger, train_dataset, args):
         train_loss = train_epoch(
             model=model, train_dataloader=train_dataloader,
             optimizer=optimizer, scheduler=scheduler,
-            logger=logger, epoch=epoch, args=args)
+            logger=logger, epoch=epoch, args=args,writer=writer)
         train_losses.append(round(train_loss, 4))
-        logger.info("train loss list:{}".format(train_losses))
+        # logger.info("train loss list:{}".format(train_losses))
+        
+    # save model
+    logger.info('saving model for epoch {}'.format(epoch + 1))
+    model_path = join(args.save_model_path,f'{args.model_name}epoch{epoch + 1}')
+    if not os.path.exists(model_path):
+        os.mkdir(model_path)
+        
+    if args.adaption_type != 'finetune':
+        torch.save(model.state_dict(), join(model_path,"delta.ckpt"))
+    else:
+        model.save_pretrained(model_path)
 
     logger.info('training finished')
     logger.info("train_losses:{}".format(train_losses))
@@ -230,9 +248,13 @@ def calculate_acc(logit, labels, ignore_index=-100):
 def main():
     # 初始化参数
     args = set_args()
+    args.epochs = int(1280 / args.shotnum)
+    args.model_name = f'{args.domain}_{args.adaption_type}_{args.shotnum}'
+    args.train_path = f'data/{args.domain}/preprocessed/{args.domain}_train_{args.shotnum}.json'
+    print(f'=====MODEL NAME:{args.model_name} TOTAL EPOCHS:{args.epochs }=====')
+    writer = SummaryWriter(comment=args.model_name + args.train_path)
 
-    # 设置使用哪些显卡进行训练
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+
     args.cuda = not args.no_cuda
 
     # if args.batch_size < 2048 and args.warmup_steps <= 4000:
@@ -253,7 +275,7 @@ def main():
     set_random_seed(args.seed, args.cuda)
 
     # 初始化tokenizer
-    tokenizer = CpmTokenizer(vocab_file="vocab/chinese_vocab.model")
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
     args.eod_id = tokenizer.convert_tokens_to_ids("<eod>")  # 文档结束符
     args.pad_id = tokenizer.pad_token_id
 
@@ -261,15 +283,21 @@ def main():
     if not os.path.exists(args.save_model_path):
         os.mkdir(args.save_model_path)
 
-    # 创建模型
-    if args.pretrained_model:  # 加载预训练模型
-        model = GPT2LMHeadModel.from_pretrained(args.pretrained_model)
-    else:  # 初始化模型
-        model_config = GPT2Config.from_json_file(args.model_config)
-        model = GPT2LMHeadModel(config=model_config)
+    # 创建模型        
+    model = AutoModelForCausalLM.from_pretrained(args.pretrained_model)
     model = model.to(device)
     logger.info('model config:\n{}'.format(model.config.to_json_string()))
     assert model.config.vocab_size == tokenizer.vocab_size
+    if args.adaption_type:
+        if args.adaption_type == 'adapter':
+            delta_model = AdapterModel(model, modified_modules=['mlp','attn'],bottleneck_dim=12)
+            delta_model.freeze_module(exclude=["deltas", "ln_f"], set_state_dict=True)
+            delta_model.log()
+        elif args.adaption_type == 'lora':
+            delta_model = AdapterModel(model, modified_modules=['mlp','attn'],bottleneck_dim=12)
+            delta_model.freeze_module(exclude=["deltas", "ln_f"], set_state_dict=True)
+            delta_model.log()
+            
 
     # 多卡并行训练模型
     if args.cuda and torch.cuda.device_count() > 1:
@@ -291,7 +319,7 @@ def main():
     # ========= Loading Dataset ========= #
     train_dataset = load_dataset(logger, args)
 
-    train(model, logger, train_dataset, args)
+    train(model, logger, train_dataset, args,writer)
 
 
 if __name__ == '__main__':

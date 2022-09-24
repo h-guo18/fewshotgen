@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import os
 import argparse
 from tqdm import trange
-from transformers import GPT2LMHeadModel, GPT2Config, CpmTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import top_k_top_p_filtering, set_logger
 from os.path import join, exists
 
@@ -39,7 +39,7 @@ def generate(max_len):
         input_ids = torch.cat((input_ids, next_token_id.unsqueeze(0)), dim=1)
         cur_len += 1
         word = tokenizer.convert_ids_to_tokens(next_token_id.item())
-        # if cur_len >= max_len:
+        if cur_len >= max_len:
         #     break
         # 超过最大长度，并且换行
         if cur_len >= max_len and last_token_id == 8 and next_token_id == 3:
@@ -63,10 +63,10 @@ if __name__ == '__main__':
     parser.add_argument('--topp', default=0.85, type=float, required=False, help='最高积累概率')
     parser.add_argument('--repetition_penalty', default=1.0, type=float, required=False, help='重复惩罚参数')
     parser.add_argument('--context_len', default=200, type=int, required=False, help='每一步生成时，参考的上文的长度')
-    parser.add_argument('--max_len', default=300, type=int, required=False, help='生成的最长长度')
+    parser.add_argument('--max_len', default=50, type=int, required=False, help='生成的最长长度')
     parser.add_argument('--log_path', default='log/generate.log', type=str, required=False, help='日志存放位置')
     parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行预测')
-    parser.add_argument('--model_path', type=str, default='model/zuowen_epoch40', help='模型存放位置')
+    parser.add_argument('--model_path', type=str, default='uer/gpt2-chinese-cluecorpussmall', help='模型存放位置')
     # parser.add_argument('--title', type=str, default='徜徉在书籍的阳光世界', help='作文标题')
     # parser.add_argument('--context', type=str, default='一本书是一个人的眼睛，它可以让你看到另一个世界的奇妙', help='作文上文')
     parser.add_argument('--title', type=str, default='家乡的四季', help='作文标题')
@@ -82,13 +82,14 @@ if __name__ == '__main__':
     logger = set_logger(args.log_path)
 
     # 初始化tokenizer
-    tokenizer = CpmTokenizer(vocab_file="vocab/chinese_vocab.model")
+    tokenizer = AutoTokenizer.from_pretrained('uer/gpt2-chinese-cluecorpussmall')
     eod_id = tokenizer.convert_tokens_to_ids("<eod>")  # 文档结束符
     sep_id = tokenizer.sep_token_id
     unk_id = tokenizer.unk_token_id
 
     # 加载模型
-    model = GPT2LMHeadModel.from_pretrained(args.model_path)
+    model = AutoModelForCausalLM.from_pretrained(args.model_path)
+    model.resize_token_embeddings(len(tokenizer))
     model.eval()
     model = model.to(device)
 
@@ -98,9 +99,9 @@ if __name__ == '__main__':
     logger.info("context:{}".format(context))
 
     # 开始生成
+    print('finish loading model.')
     result = generate(args.max_len)
-    result = result.split("<sep>")[1]
-    logger.info("result:{}\n".format(result))
+    logger.info("result:{}\n".format(result.replace(' ','')))
 
     # 通过控制台循环生成
     # print('开始生成，输入CTRL + Z以退出')

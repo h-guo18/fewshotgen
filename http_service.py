@@ -86,7 +86,8 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=8085, help='服务绑定的端口号')
     parser.add_argument('--log_path', default='log/http_service.log', type=str, required=False, help='日志存放位置')
     parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行预测')
-    parser.add_argument('--model_path', type=str, default='model/zuowen_epoch40', help='模型存放位置')
+    parser.add_argument('--model_path', type=str, default='save/gongwen_32_epoch80/', help='模型存放位置')
+
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device  # 此处设置程序使用哪些显卡
