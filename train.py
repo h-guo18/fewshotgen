@@ -26,6 +26,7 @@ from dataset import CPMDataset
 import json
 from tensorboardX import SummaryWriter
 from opendelta import Visualization, AdapterModel
+import copy
 TEST_DOMAIN = ['gongwen','international','poetry','sports','story']
 
 
@@ -44,12 +45,10 @@ def set_args():
     parser.add_argument('--max_len', default=200, type=int, required=False, help='训练时，输入数据的最大长度')
     parser.add_argument('--log_path', default='log/train.log', type=str, required=False, help='训练日志存放位置')
     parser.add_argument('--ignore_index', default=-100, type=int, required=False, help='对于ignore_index的label token不计算梯度')
-    parser.add_argument('--epochs', default=-1, type=int, required=False, help='训练的最大轮次')
     parser.add_argument('--batch_size', default=2, type=int, required=False, help='训练的batch size')
     parser.add_argument('--gpu0_bsz', default=6, type=int, required=False, help='0号卡的batch size')
-    parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
+    parser.add_argument('--lr', default=1e-5, type=float, required=False, help='学习率')
     parser.add_argument('--eps', default=1.0e-09, type=float, required=False, help='AdamW优化器的衰减率')
-    parser.add_argument('--log_step', default=5, type=int, required=False, help='多少步汇报一次loss')
     parser.add_argument('--gradient_accumulation_steps', default=6, type=int, required=False, help='梯度积累的步数')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--save_model_path', default='save/', type=str, required=False,
@@ -58,9 +57,10 @@ def set_args():
                         help='预训练的模型的路径')
     parser.add_argument('--seed', type=int, default=1234, help='设置随机种子')
     parser.add_argument('--num_workers', type=int, default=0, help="dataloader加载数据时使用的线程数量")
-    # parser.add_argument('--patience', type=int, default=0, help="用于early stopping,设为0时,不进行early stopping.early stop得到的模型的生成效果不一定会更好。")
+    parser.add_argument('--patience', type=int, default=10, help="用于early stopping,设为0时,不进行early stopping.early stop得到的模型的生成效果不一定会更好。")
     # parser.add_argument('--label_smoothing', default=True, action='store_true', help='是否进行标签平滑')
     parser.add_argument('--model_name', type=str, default='', help='model name')
+    # parser.add_argument('--dev_size', type=int, default='200', help='number of samples in dev set')
 
     args = parser.parse_args()
     return args
@@ -78,16 +78,20 @@ def load_dataset(logger, args):
     """
     logger.info("loading training dataset")
     train_path = args.train_path
+    dev_path = args.dev_path
 
     with open(train_path, "r") as f:
         train_list = json.loads(f.read())
+    with open(dev_path, "r") as f:
+        dev_list = json.loads(f.read())
 
     # test
     # train_list = train_list[:24]
 
     train_dataset = CPMDataset(train_list, args.max_len)
+    dev_dataset = CPMDataset(dev_list[:len(train_list)], args.max_len) #dev set should be the same size as train set. note that it's not args.shotnum.
 
-    return train_dataset
+    return train_dataset, dev_dataset
 
 
 def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
@@ -101,9 +105,10 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
     epoch_correct_num = 0   # 每个epoch中,预测正确的word的数量
     epoch_total_num = 0  # 每个epoch中,预测的word的总数量
     batch_loss =0
+    pbar = tqdm(enumerate(train_dataloader),total = len(train_dataloader),desc = f'epoch {epoch}/ max:{args.max_epochs}')
 
 
-    for batch_idx, (input_ids, labels) in tqdm(enumerate(train_dataloader),total = len(train_dataloader),desc = f'epoch {epoch}/ {args.epochs}'):
+    for batch_idx, (input_ids, labels) in pbar:
         # 捕获cuda out of memory exception
         try:
             input_ids = input_ids.to(device)
@@ -137,14 +142,7 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
                 scheduler.step()
                 # 清空梯度信息
                 optimizer.zero_grad()
-            batch_loss = loss.item() * args.gradient_accumulation_steps
-
-            if (batch_idx + 1) % args.log_step == 0:
-                writer.add_scalar('batch_loss', loss.item() * args.gradient_accumulation_steps,global_step = batch_idx + 1 + len(train_dataloader)*epoch )
-                writer.add_scalar('lr', scheduler.get_lr(),global_step = batch_idx + 1 + len(train_dataloader)*epoch )
-                # logger.info(
-                #     "batch {} of epoch {}, loss {}, batch_acc {}, lr {}".format(
-                #         batch_idx + 1, epoch + 1, loss.item() * args.gradient_accumulation_steps, batch_acc, scheduler.get_lr()))
+            pbar.set_postfix({'batch_loss':loss.item() * args.gradient_accumulation_steps, 'lr':scheduler.get_lr()})
 
             del input_ids, outputs
 
@@ -171,43 +169,121 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
 
     return epoch_mean_loss
 
+def validation_epoch(model, dev_dataloader, logger,
+                epoch, args,writer):
+    model.eval()
+    device = args.device
+    ignore_index = args.ignore_index
+    epoch_start_time = datetime.now()
 
-def train(model, logger, train_dataset, args,writer):
+    total_loss = 0  # 记录下整个epoch的loss的总和
+    epoch_correct_num = 0   # 每个epoch中,预测正确的word的数量
+    epoch_total_num = 0  # 每个epoch中,预测的word的总数量
+    pbar = tqdm(enumerate(dev_dataloader),total = len(dev_dataloader),desc = f'validation for epoch {epoch}/ max:{args.max_epochs}')
+
+    with torch.no_grad():
+        for batch_idx, (input_ids, labels) in pbar:
+            # 捕获cuda out of memory exception
+            try:
+                input_ids = input_ids.to(device)
+                labels = labels.to(device)
+                outputs = model.forward(input_ids, labels=labels)
+                logits = outputs.logits
+                loss = outputs.loss
+                loss = loss.mean()
+
+                # 统计该batch的预测token的正确数与总数
+                batch_correct_num, batch_total_num = calculate_acc(logits, labels, ignore_index=ignore_index)
+                # 统计该epoch的预测token的正确数与总数
+                epoch_correct_num += batch_correct_num
+                epoch_total_num += batch_total_num
+                total_loss += loss.item()
+                pbar.set_postfix({'loss':loss})
+                if args.gradient_accumulation_steps > 1:
+                    loss = loss / args.gradient_accumulation_steps
+                del input_ids, outputs
+
+            except RuntimeError as exception:
+                if "out of memory" in str(exception):
+                    logger.info("WARNING: ran out of memory")
+                    if hasattr(torch.cuda, 'empty_cache'):
+                        torch.cuda.empty_cache()
+                else:
+                    logger.info(str(exception))
+                    raise exception
+
+    # 记录当前epoch的平均loss与accuracy
+    epoch_mean_loss = total_loss / len(dev_dataloader)
+    epoch_mean_acc = epoch_correct_num / epoch_total_num
+    writer.add_scalar('valid_loss', epoch_mean_loss,global_step =epoch + 1)
+    writer.add_scalar('valid_acc', epoch_mean_acc,global_step =epoch + 1)
+    logger.info(
+        "validation for epoch {}: loss {}, predict_acc {}".format(epoch + 1, epoch_mean_loss, epoch_mean_acc))
+    epoch_finish_time = datetime.now()
+
+    return epoch_mean_loss
+
+def train_stop(args, valid_losses):
+    """return whether or not stop training."""
+    if len(valid_losses) >= args.patience:
+        if min(valid_losses) not in valid_losses[-args.patience:]: #no better epoch, stop training
+            return True
+        else:
+            return False
+    else:
+        return False
+
+def train(model, logger, train_dataset, dev_dataset, args,writer):
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn,
         drop_last=True
     )
-    t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.epochs
+    dev_dataloader = DataLoader(
+        dev_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn,
+        drop_last=True
+    )
+    t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.max_epochs
     optimizer = transformers.AdamW(model.parameters(), lr=args.lr, eps=args.eps)
     scheduler = transformers.get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=0.3*t_total, num_training_steps=t_total
+        optimizer, num_warmup_steps=0.6*t_total, num_training_steps=t_total
     )
 
     logger.info('start training')
 
     train_losses = []   # 记录每个epoch的平均loss
+    valid_losses = []
     # ========== start training ========== #
-    for epoch in range(args.epochs):
+    for epoch in range(args.max_epochs):
         train_loss = train_epoch(
             model=model, train_dataloader=train_dataloader,
             optimizer=optimizer, scheduler=scheduler,
             logger=logger, epoch=epoch, args=args,writer=writer)
         train_losses.append(round(train_loss, 4))
         # logger.info("train loss list:{}".format(train_losses))
-        
+        #validation
+        valid_loss = validation_epoch(
+            model=model, dev_dataloader=dev_dataloader,
+            logger=logger, epoch=epoch, args=args,writer=writer)
+        if len(valid_losses) > 0 and valid_loss <= min(valid_losses):
+            best_epoch = epoch
+            best_model = copy.deepcopy(model)
+        valid_losses.append(round(valid_loss, 4))
+        if train_stop(args,valid_losses):
+            break
     # save model
-    logger.info('saving model for epoch {}'.format(epoch + 1))
-    model_path = join(args.save_model_path,f'{args.model_name}epoch{epoch + 1}')
+    logger.info('saving model for epoch {}'.format(best_epoch + 1))
+    model_path = join(args.save_model_path,f'{args.model_name}epoch{best_epoch + 1}')
     if not os.path.exists(model_path):
         os.mkdir(model_path)
         
     if args.adaption_type != 'finetune':
-        torch.save(model.state_dict(), join(model_path,"delta.ckpt"))
+        torch.save(best_model.state_dict(), join(model_path,"delta.ckpt"))
     else:
-        model.save_pretrained(model_path)
+        best_model.save_pretrained(model_path)
 
     logger.info('training finished')
     logger.info("train_losses:{}".format(train_losses))
+    logger.info("valid_losses:{}".format(valid_losses))
 
 
 def caculate_loss(logit, target, pad_idx, smoothing=True):
@@ -248,10 +324,11 @@ def calculate_acc(logit, labels, ignore_index=-100):
 def main():
     # 初始化参数
     args = set_args()
-    args.epochs = int(1280 / args.shotnum)
+    args.max_epochs = int(12800 / args.shotnum) # this is sufficent. real epoch num is decided by tarin_stop() function.
     args.model_name = f'{args.domain}_{args.adaption_type}_{args.shotnum}'
     args.train_path = f'data/{args.domain}/preprocessed/{args.domain}_train_{args.shotnum}.json'
-    print(f'=====MODEL NAME:{args.model_name} TOTAL EPOCHS:{args.epochs }=====')
+    args.dev_path = f'data/{args.domain}/preprocessed/{args.domain}_dev.json'
+    print(f'=====MODEL NAME:{args.model_name}=====')
     writer = SummaryWriter(comment=args.model_name + args.train_path)
 
 
@@ -317,9 +394,9 @@ def main():
 
     # 加载训练集和验证集
     # ========= Loading Dataset ========= #
-    train_dataset = load_dataset(logger, args)
+    train_dataset,dev_dataset = load_dataset(logger, args)
 
-    train(model, logger, train_dataset, args,writer)
+    train(model, logger, train_dataset, dev_dataset,args,writer)
 
 
 if __name__ == '__main__':
