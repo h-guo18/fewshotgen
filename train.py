@@ -49,7 +49,7 @@ def set_args():
     parser.add_argument('--gpu0_bsz', default=6, type=int, required=False, help='0号卡的batch size')
     parser.add_argument('--lr', default=1e-5, type=float, required=False, help='学习率')
     parser.add_argument('--eps', default=1.0e-09, type=float, required=False, help='AdamW优化器的衰减率')
-    parser.add_argument('--gradient_accumulation_steps', default=6, type=int, required=False, help='梯度积累的步数')
+    parser.add_argument('--gradient_accumulation_steps', default=2, type=int, required=False, help='梯度积累的步数')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--save_model_path', default='save/', type=str, required=False,
                         help='模型输出路径')
@@ -74,7 +74,7 @@ def collate_fn(batch):
 
 def load_dataset(logger, args):
     """
-    加载训练集
+    加载训练集和验证集
     """
     logger.info("loading training dataset")
     train_path = args.train_path

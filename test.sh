@@ -1,7 +1,7 @@
 export PYTHONPATH=/home/guohao/.local/lib
 for adaption_type in "finetune"
 do 
-    for domain in  "gongwen"
+    for domain in  "poetry" "international" "sports" "story" 
     # for domain in "gongwen"
     #poetry data too short, need to fix
     do
