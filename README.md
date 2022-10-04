@@ -23,6 +23,10 @@ And the model will be saved to `save/` directory by default.
 `python test.py --shotnum $shotnum --domain $domain --adaption_type $adaption_type`  
 And the prediction file will be saved to `pred/` directory by default.  
 ####  command arguments  
-`$shotnum`: number of examples, possible values: {4,8,16,32,64,128};  
+`$shotnum`: number of examples, possible values: {0,4,8,16,32,64,128};  
 `$domain`: domain of adaption, {'gongwen', 'international', 'peotry', 'sports', 'story'};  
-`$adaption_type`: 'finetune', 'adapter', or 'lora'; indicate type of adpation;  
+`$adaption_type`: 'finetune', 'adapter', 'lora', or 'retrieval'; indicate methods of adpation to target domain;  
+>* 'finetune': Traditional full-parameter adaption;  
+>* 'adapter': Parameter-efficient tuning by adding parameter blocks, paper: <https://arxiv.org/pdf/1902.00751.pdf>;  
+>* 'lora': Parameter-efficient tuning by adding low-rank matrics, paper: <https://arxiv.org/pdf/2106.09685.pdf>;  
+>* 'retrieval': Input encodings of retrieved passages as reference. Training with this settings will add cross-attention blocks and freeze other parameters. The result should be a domain-agnostic LM with ability to consult given passages.  

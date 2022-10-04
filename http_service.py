@@ -24,9 +24,11 @@ def generate_next_token(input_ids):
     next_token_logits = next_token_logits / args.temperature
     # 对于<unk>的概率设为无穷小，也就是说模型的预测结果不可能是[UNK]这个token
     next_token_logits[unk_id] = -float('Inf')
-    filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=args.topk, top_p=args.topp)
+    filtered_logits = top_k_top_p_filtering(
+        next_token_logits, top_k=args.topk, top_p=args.topp)
     # torch.multinomial表示从候选集合中选出无放回地进行抽取num_samples个元素，权重越高，抽到的几率越高，返回元素的下标
-    next_token_id = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+    next_token_id = torch.multinomial(
+        F.softmax(filtered_logits, dim=-1), num_samples=1)
     return next_token_id
 
 
@@ -77,16 +79,23 @@ def zuowen():
 if __name__ == '__main__':
     # 参数设置
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='1', type=str, required=False, help='生成设备')
-    parser.add_argument('--temperature', default=1, type=float, required=False, help='生成温度')
-    parser.add_argument('--topk', default=0, type=int, required=False, help='最高几选一')
-    parser.add_argument('--topp', default=0.85, type=float, required=False, help='最高积累概率')
-    parser.add_argument('--context_len', default=200, type=int, required=False, help='作文生成中，每一步生成时，参考的上文的长度')
+    parser.add_argument('--device', default='1', type=str,
+                        required=False, help='生成设备')
+    parser.add_argument('--temperature', default=1,
+                        type=float, required=False, help='生成温度')
+    parser.add_argument('--topk', default=0, type=int,
+                        required=False, help='最高几选一')
+    parser.add_argument('--topp', default=0.85, type=float,
+                        required=False, help='最高积累概率')
+    parser.add_argument('--context_len', default=200, type=int,
+                        required=False, help='作文生成中，每一步生成时，参考的上文的长度')
     # parser.add_argument('--repetition_penalty', default=1.0, type=float, required=False, help='重复惩罚参数')
     parser.add_argument('--port', type=int, default=8085, help='服务绑定的端口号')
-    parser.add_argument('--log_path', default='log/http_service.log', type=str, required=False, help='日志存放位置')
+    parser.add_argument('--log_path', default='log/http_service.log',
+                        type=str, required=False, help='日志存放位置')
     parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行预测')
-    parser.add_argument('--model_path', type=str, default='save/gongwen_32_epoch80/', help='模型存放位置')
+    parser.add_argument('--model_path', type=str,
+                        default='save/gongwen_32_epoch80/', help='模型存放位置')
 
     args = parser.parse_args()
 

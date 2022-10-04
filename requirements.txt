@@ -1,0 +1,5 @@
+torch==1.12.1
+transformers==4.21.1
+tqdm
+tokenizers==0.12.1
+nltk==3.7

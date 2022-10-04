@@ -19,9 +19,11 @@ def generate_next_token(input_ids):
     next_token_logits = next_token_logits / args.temperature
     # 对于<unk>的概率设为无穷小，也就是说模型的预测结果不可能是[UNK]这个token
     next_token_logits[unk_id] = -float('Inf')
-    filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=args.topk, top_p=args.topp)
+    filtered_logits = top_k_top_p_filtering(
+        next_token_logits, top_k=args.topk, top_p=args.topp)
     # torch.multinomial表示从候选集合中选出无放回地进行抽取num_samples个元素，权重越高，抽到的几率越高，返回元素的下标
-    next_token_id = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+    next_token_id = torch.multinomial(
+        F.softmax(filtered_logits, dim=-1), num_samples=1)
     return next_token_id
 
 
@@ -40,8 +42,8 @@ def generate(max_len):
         cur_len += 1
         word = tokenizer.convert_ids_to_tokens(next_token_id.item())
         if cur_len >= max_len:
-        #     break
-        # 超过最大长度，并且换行
+            #     break
+            # 超过最大长度，并且换行
         if cur_len >= max_len and last_token_id == 8 and next_token_id == 3:
             break
         # 超过最大长度，并且生成标点符号
@@ -57,20 +59,30 @@ def generate(max_len):
 if __name__ == '__main__':
     # 参数设置
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='0', type=str, required=False, help='生成设备')
-    parser.add_argument('--temperature', default=1, type=float, required=False, help='生成温度')
-    parser.add_argument('--topk', default=0, type=int, required=False, help='最高几选一')
-    parser.add_argument('--topp', default=0.85, type=float, required=False, help='最高积累概率')
-    parser.add_argument('--repetition_penalty', default=1.0, type=float, required=False, help='重复惩罚参数')
-    parser.add_argument('--context_len', default=200, type=int, required=False, help='每一步生成时，参考的上文的长度')
-    parser.add_argument('--max_len', default=50, type=int, required=False, help='生成的最长长度')
-    parser.add_argument('--log_path', default='log/generate.log', type=str, required=False, help='日志存放位置')
+    parser.add_argument('--device', default='0', type=str,
+                        required=False, help='生成设备')
+    parser.add_argument('--temperature', default=1,
+                        type=float, required=False, help='生成温度')
+    parser.add_argument('--topk', default=0, type=int,
+                        required=False, help='最高几选一')
+    parser.add_argument('--topp', default=0.85, type=float,
+                        required=False, help='最高积累概率')
+    parser.add_argument('--repetition_penalty', default=1.0,
+                        type=float, required=False, help='重复惩罚参数')
+    parser.add_argument('--context_len', default=200, type=int,
+                        required=False, help='每一步生成时，参考的上文的长度')
+    parser.add_argument('--max_len', default=50, type=int,
+                        required=False, help='生成的最长长度')
+    parser.add_argument('--log_path', default='log/generate.log',
+                        type=str, required=False, help='日志存放位置')
     parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行预测')
-    parser.add_argument('--model_path', type=str, default='uer/gpt2-chinese-cluecorpussmall', help='模型存放位置')
+    parser.add_argument('--model_path', type=str,
+                        default='uer/gpt2-chinese-cluecorpussmall', help='模型存放位置')
     # parser.add_argument('--title', type=str, default='徜徉在书籍的阳光世界', help='作文标题')
     # parser.add_argument('--context', type=str, default='一本书是一个人的眼睛，它可以让你看到另一个世界的奇妙', help='作文上文')
     parser.add_argument('--title', type=str, default='家乡的四季', help='作文标题')
-    parser.add_argument('--context', type=str, default='家乡的四季,最美不过了', help='作文上文')
+    parser.add_argument('--context', type=str,
+                        default='家乡的四季,最美不过了', help='作文上文')
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device  # 此处设置程序使用哪些显卡
@@ -82,7 +94,8 @@ if __name__ == '__main__':
     logger = set_logger(args.log_path)
 
     # 初始化tokenizer
-    tokenizer = AutoTokenizer.from_pretrained('uer/gpt2-chinese-cluecorpussmall')
+    tokenizer = AutoTokenizer.from_pretrained(
+        'uer/gpt2-chinese-cluecorpussmall')
     eod_id = tokenizer.convert_tokens_to_ids("<eod>")  # 文档结束符
     sep_id = tokenizer.sep_token_id
     unk_id = tokenizer.unk_token_id
@@ -101,7 +114,7 @@ if __name__ == '__main__':
     # 开始生成
     print('finish loading model.')
     result = generate(args.max_len)
-    logger.info("result:{}\n".format(result.replace(' ','')))
+    logger.info("result:{}\n".format(result.replace(' ', '')))
 
     # 通过控制台循环生成
     # print('开始生成，输入CTRL + Z以退出')
@@ -122,5 +135,3 @@ if __name__ == '__main__':
     #
     #     except KeyboardInterrupt:
     #         break
-
-

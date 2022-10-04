@@ -58,17 +58,20 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
         # Remove all tokens with a probability less than the last token of the top-k
         # torch.topk()返回最后一维最大的top_k个元素，返回值为二维(values,indices)
         # ...表示其他维度由计算机自行推断
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        indices_to_remove = logits < torch.topk(logits, top_k)[
+            0][..., -1, None]
         logits[indices_to_remove] = filter_value
 
     if top_p > 0.0:
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        cumulative_probs = torch.cumsum(
+            F.softmax(sorted_logits, dim=-1), dim=-1)
 
         # Remove tokens with cumulative probability above the threshold
         sorted_indices_to_remove = cumulative_probs > top_p
         # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[...,
+                                 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
 
         indices_to_remove = sorted_indices[sorted_indices_to_remove]
