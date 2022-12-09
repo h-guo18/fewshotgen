@@ -15,10 +15,10 @@ from torch.nn import DataParallel
 import transformers
 import pickle
 import sys
-from utils import set_logger, set_random_seed
+from utils import set_logger, set_random_seed, retrieve_reference
 from sklearn.model_selection import train_test_split
 from data_parallel import BalancedDataParallel
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BertModel
 import pandas as pd
 import torch.nn.utils.rnn as rnn_utils
 import numpy as np
@@ -114,7 +114,7 @@ def load_dataset(logger, args):
 
 
 def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
-                epoch, args, writer):
+                epoch, args, writer,tokenizer,bert_tokenizer,bert_model):
     model.train()
     device = args.device
     ignore_index = args.ignore_index
@@ -133,10 +133,16 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
             input_ids = input_ids.to(device)
             labels = labels.to(device)
             # retrieved passage encodings if args.adaption_type == 'retrieval' else None
-            reference = reference.to(device)
+            if args.adaption_type == 'retrieval':
+                references = retrieve_reference(tokenizer.batch_decode(input_ids))
+                ref_ids = bert_tokenizer(references, padding=True, truncation=True, return_tensors='pt').to(device)
+                ref_hidden_states = bert_model(**ref_ids).last_hidden_state
+            else:
+                ref_hidden_states = None
+            
             outputs = model.forward(input_ids,
                                     labels=labels,
-                                    encoder_hidden_states=reference)
+                                    encoder_hidden_states=ref_hidden_states)
             logits = outputs.logits
             loss = outputs.loss
             loss = loss.mean()
@@ -198,7 +204,7 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
 
 
 def validation_epoch(model, dev_dataloader, logger,
-                     epoch, args, writer):
+                     epoch, args, writer,tokenizer,bert_tokenizer,bert_model):
     model.eval()
     device = args.device
     ignore_index = args.ignore_index
@@ -216,7 +222,17 @@ def validation_epoch(model, dev_dataloader, logger,
             try:
                 input_ids = input_ids.to(device)
                 labels = labels.to(device)
-                outputs = model.forward(input_ids, labels=labels)
+                # retrieved passage encodings if args.adaption_type == 'retrieval' else None
+                if args.adaption_type == 'retrieval':
+                    references = retrieve_reference(tokenizer.batch_decode(input_ids))
+                    ref_ids = bert_tokenizer(references, padding=True, truncation=True, return_tensors='pt').to(device)
+                    ref_hidden_states = bert_model(**ref_ids).last_hidden_state
+                else:
+                    ref_hidden_states = None
+                
+                outputs = model.forward(input_ids,
+                                        labels=labels,
+                                        encoder_hidden_states=ref_hidden_states)
                 logits = outputs.logits
                 loss = outputs.loss
                 loss = loss.mean()
@@ -266,7 +282,7 @@ def train_stop(args, valid_losses):
         return False
 
 
-def train(model, logger, train_dataset, dev_dataset, args, writer):
+def train(model, logger, train_dataset, dev_dataset, args, writer,tokenizer,bert_tokenizer,bert_model):
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn,
         drop_last=True
@@ -292,13 +308,13 @@ def train(model, logger, train_dataset, dev_dataset, args, writer):
         train_loss = train_epoch(
             model=model, train_dataloader=train_dataloader,
             optimizer=optimizer, scheduler=scheduler,
-            logger=logger, epoch=epoch, args=args, writer=writer)
+            logger=logger, epoch=epoch, args=args, writer=writer,tokenizer=tokenizer,bert_tokenizer=bert_tokenizer,bert_model=bert_model)
         train_losses.append(round(train_loss, 4))
         # logger.info("train loss list:{}".format(train_losses))
         # validation
         valid_loss = validation_epoch(
             model=model, dev_dataloader=dev_dataloader,
-            logger=logger, epoch=epoch, args=args, writer=writer)
+            logger=logger, epoch=epoch, args=args, writer=writer,tokenizer=tokenizer,bert_tokenizer=bert_tokenizer,bert_model=bert_model)
         if len(valid_losses) > 0 and valid_loss <= min(valid_losses):
             best_epoch = epoch
             best_model = copy.deepcopy(model)
@@ -312,7 +328,7 @@ def train(model, logger, train_dataset, dev_dataset, args, writer):
     if not os.path.exists(model_path):
         os.mkdir(model_path)
 
-    if args.adaption_type not in ['finetune', 'retrieval']:
+    if args.adaption_type not in ['finetune']:
         torch.save(best_model.state_dict(), join(model_path, "delta.ckpt"))
     else:
         best_model.save_pretrained(model_path)
@@ -392,6 +408,15 @@ def main():
     args.eod_id = tokenizer.convert_tokens_to_ids("<eod>")  # 文档结束符
     args.pad_id = tokenizer.pad_token_id
 
+    # 如果需要检索，加载额外的bert tokenizer
+    if args.adaption_type == 'retrieval':
+        bert_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+        bert_model = BertModel.from_pretrained("bert-base-chinese").to(device)
+        bert_model.eval()
+    else:
+        bert_tokenizer, bert_model = None,None
+    print('BERT MODEL LOADED')
+        
     # 创建模型的输出目录
     if not os.path.exists(args.save_model_path):
         os.mkdir(args.save_model_path)
@@ -399,9 +424,10 @@ def main():
     # 创建模型
     model = AutoModelForCausalLM.from_pretrained(args.pretrained_model,
                                                  add_cross_attention=(
-                                                     args.adation_type == 'retrieval')
+                                                     args.adaption_type == 'retrieval')
                                                  )  # during retireval mode, this will add extra parameters;
     model = model.to(device)
+    print('GPT2 MODEL LOADED')
     logger.info('model config:\n{}'.format(model.config.to_json_string()))
     assert model.config.vocab_size == tokenizer.vocab_size
     if args.adaption_type:
@@ -442,7 +468,7 @@ def main():
     # ========= Loading Dataset ========= #
     train_dataset, dev_dataset = load_dataset(logger, args)
 
-    train(model, logger, train_dataset, dev_dataset, args, writer)
+    train(model, logger, train_dataset, dev_dataset, args, writer,tokenizer,bert_tokenizer,bert_model)
 
 
 if __name__ == '__main__':

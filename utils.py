@@ -3,7 +3,8 @@ import torch
 import random
 import numpy as np
 import torch.nn.functional as F
-
+import requests
+RETRIEVE_API = 'http://192.168.1.99:8085/retrieve'
 
 def set_logger(log_path):
     """
@@ -77,3 +78,21 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
         indices_to_remove = sorted_indices[sorted_indices_to_remove]
         logits[indices_to_remove] = filter_value
     return logits
+
+
+def retrieve_reference(context_list,k=3):
+    results = []
+    for context in context_list:
+        r = requests.get(RETRIEVE_API,params = {'query':context,'k':k})
+        neighbors = r.json()['neighbors']
+        reference = '[SEP]'.join([ n['neighbor']+n['continuation']for n in neighbors])
+        results.append(reference)
+    return results
+
+#UNIT TEST
+if __name__ == '__main__':
+    context_list = ['十八大以来，中共中央总书记习近平指出，中国共产党要紧紧依靠中国人民',
+                    '人滑第三名日本选手村主章枝，冰上舞蹈世界排名第三的俄罗斯选手纳夫卡／科斯特马洛夫等一批世界级名将。\n俄罗斯的盐湖城冬奥会男子单人滑冠军亚古金因伤病原因退出了本次比赛，美国著名女子单人滑选手关颖珊因没有',
+                    '清华大学建校100周年，校长邱勇与今天早上凌晨六点在主楼前面向全校师生发表重要讲话，鼓励大家自强不息厚德载物，一起打赢疫情防控清华保卫战'
+                    ]
+    print(retrieve_reference(context_list))
